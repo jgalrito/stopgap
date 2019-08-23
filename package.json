@@ -1,0 +1,15 @@
+{
+  "name": "wav",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^6.0.1",
+    "electron-reload": "^1.5.0"
+  }
+}
