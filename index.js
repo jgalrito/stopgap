@@ -2,9 +2,13 @@ const
 	{ app, BrowserWindow, ipcMain } = require('electron'),
 	fs = require('fs')
 
+const { readSample } = require('./utils')
+
 require('electron-reload')(__dirname)
 
-const CACHE_LEVELS = [5, 8, 10, 12, 14]
+const
+	CACHE_LEVELS = [5, 8, 10, 12, 14],
+	CONSECUTIVE_DROPPED_SAMPLES = 10
 
 let loadedFile,
 	loadedFileHeader,
@@ -113,14 +117,8 @@ const getSamples = () => new Promise((resolve, reject) => {
 				view = new DataView(data.buffer),
 				res = []
 
-			for(let i=0; i<data.length; i+=loadedFileHeader.BlockAlign) {
-				let sample = 0
-
-				for(let j=0; j<loadedFileHeader.BlockAlign; j++)
-					sample += view.getInt8(i+j) << (8 * j)
-
-				res.push(sample)
-			}
+			for(let i=0; i<data.length; i+=loadedFileHeader.BlockAlign)
+				res.push(readSample(view, i, loadedFileHeader.BlockAlign))
 
 			resolve(res)
 		}
@@ -200,19 +198,15 @@ ipcMain.on('get-view', (e, start, end, zoomLevel) => {
 		startIndex = Math.round(start/nearestLevelResolution),
 		relevantChunk = cachedChunks[nearestLevelIndex].slice(startIndex, startIndex + Math.ceil((end-start)/resolution)*resolution/nearestLevelResolution)
 
-	if(CACHE_LEVELS[nearestLevelIndex] === zoomLevel)
-		e.reply('view', relevantChunk)
-	else 
-		e.reply('view', generateCache(zoomLevel, CACHE_LEVELS[nearestLevelIndex], relevantChunk))
+	e.returnValue = CACHE_LEVELS[nearestLevelIndex] === zoomLevel ? relevantChunk : generateCache(zoomLevel, CACHE_LEVELS[nearestLevelIndex], relevantChunk)
 })
 
 ipcMain.on('get-samples', (e, start, end) =>
-	fs.read(loadedFile, Buffer.alloc((end-start)*loadedFileHeader.BlockAlign), 0, (end-start)*loadedFileHeader.BlockAlign, loadedFileHeader.DataOffset + start*loadedFileHeader.BlockAlign, (err, bytesRead, buf) =>
-		e.reply('samples', buf)))
+	fs.read(loadedFile, Buffer.alloc((end-start)*loadedFileHeader.BlockAlign), 0, (end-start)*loadedFileHeader.BlockAlign, loadedFileHeader.DataOffset + start*loadedFileHeader.BlockAlign, (err, bytesRead, buf) => {
+		e.returnValue = buf
+	}))
 
-ipcMain.on('get-analysis', async (e, volumeThreshold, varianceThreshold, lengthThreshold) => {
-	lengthThreshold = +lengthThreshold
-
+ipcMain.on('get-analysis', async e => {
 	const
 		pops = [],
 		samples = await getSamples(),
@@ -222,19 +216,43 @@ ipcMain.on('get-analysis', async (e, volumeThreshold, varianceThreshold, lengthT
 		if(i%onePerCent === 0)
 			e.reply('analysis-progress', i, samples.length)
 
-		if(Math.abs(samples[i+1] - samples[i]) > volumeThreshold) {
-			let droppedSamples = []
+		if(samples[i] === 0) {
+			let droppedSamples = [i]
 
-			for(let j=0; j<lengthThreshold; j++) {
-				if(Math.abs(samples[i+j+1]) < varianceThreshold)
-					droppedSamples.push(samples[i+j+1])
+			for(let j=1; j<CONSECUTIVE_DROPPED_SAMPLES; j++) {
+				if(samples[i+j] === 0)
+					droppedSamples.push(samples[i+j])
 				else break
 			}
 
-			if(droppedSamples.length === lengthThreshold)
-				pops.push([i, droppedSamples])
+			if(droppedSamples.length === CONSECUTIVE_DROPPED_SAMPLES) {
+				//get average value before/after
+				const
+					before = samples.slice(i-4, i),
+					after = samples.slice(i+droppedSamples+2, i+droppedSamples+6)
 
-			i+=droppedSamples.length
+				let avgBefore = 0,
+					avgAfter = 0
+
+				for(let j=0; j<before.length-1; j++)
+					avgBefore += before[j+1] - before[j]
+
+				avgBefore /= before.length - 1
+
+				for(let j=0; j<after.length-1; j++)
+					avgAfter += after[j+1] - after[j]
+
+				avgAfter /= after.length - 1
+
+				//expected values in the middle
+				const
+					expectedFromLeft = samples[i-1] + avgBefore * 5,
+					expectedFromRight = samples[i+droppedSamples.length+2] - avgAfter * 5
+
+				pops.push([i, (expectedFromLeft+expectedFromRight)/2])
+			}
+
+			i+=droppedSamples.length+2
 		}
 	}
 

@@ -41,8 +41,7 @@
 			background-color: grey;
 		}
 
-		#pops-table {
-			display: block;
+		#pops-list {
 			height: 400px;
 			overflow: auto;
 		}
@@ -61,28 +60,12 @@
 	<br>
 	<div style="display: flex">
 		<div>
-			<span>Volume threshold: <span id="threshold-value"></span></span><br>
-			<input type="range" min="0" max="300" id="threshold" /><br>
-			<span>Variance threshold: <span id="variance-value"></span></span><br>
-			<input type="range" min="0" max="20" id="variance-threshold" /><br>
-			<span>Length threshold: <span id="length-value"></span></span><br>
-			<input type="range" min="0" max="20" id="length-threshold" /><br><br>
-			<button id="analyse">Analyse</button><progress id="analysis-progress"></progress><br><br>
+			<button id="analyse">Analyse</button> <progress id="analysis-progress"></progress><br><br>
 			<span><span id="pops-value">0</span> pops found</span>
 			<button id="prev-pop">Previous pop</button>
 			<button id="next-pop">Next pop</button>
 		</div>
-		<table id="pops-table">
-			<thead>
-				<tr>
-					<th>Sample</th>
-					<th>Dropped samples</th>
-					<th>Samples</th>
-				</tr>
-			</thead>
-			<tbody id="pops-table-body">
-			</tbody>
-		</table>
+		<ul id="pops-list"></ul>
 	</div>
 </body>
 <script>	
@@ -90,13 +73,12 @@ const
 	{ ipcRenderer } = require('electron'),
 	path = require('path')
 
+const { readSample } = require('./utils')
+
 const
 	MIN_ZOOM_LEVEL = -3,
 	MAX_ZOOM_LEVEL = 16,
-	DEFAULT_RESOLUTION = 256,
-	DEFAULT_THRESHOLD = 150,
-	DEFAULT_VARIANCE = 10,
-	DEFAULT_LENGTH = 10
+	DEFAULT_RESOLUTION = 256
 
 let resolution = DEFAULT_RESOLUTION,
 	zoomLevel = Math.log2(resolution),
@@ -115,93 +97,71 @@ const
 	analyse = document.getElementById('analyse'),
 	markersCanvas = document.getElementById('markers'),
 	markersContext = markersCanvas.getContext('2d'),
-	thresholdSlider = document.getElementById('threshold'),
-	thresholdSliderLabel = document.getElementById('threshold-value'),
 	popsLabel = document.getElementById('pops-value'),
 	analysisProgress = document.getElementById('analysis-progress'),
 	play = document.getElementById('play'),
 	prevPop = document.getElementById('prev-pop'),
 	nextPop = document.getElementById('next-pop'),
-	popsTableBody = document.getElementById('pops-table-body'),
-	varianceThresholdSlider = document.getElementById('variance-threshold'),
-	varianceThresholdLabel = document.getElementById('variance-value'),
-	lengthThresholdSlider = document.getElementById('length-threshold'),
-	lengthThresholdLabel = document.getElementById('length-value')
+	popsList = document.getElementById('pops-list')
 
-zoomLevelLabel.innerText = zoomLevel,
-thresholdSlider.value = DEFAULT_THRESHOLD,
-thresholdSliderLabel.innerText = DEFAULT_THRESHOLD,
-varianceThresholdSlider.value = DEFAULT_VARIANCE,
-varianceThresholdLabel.innerText = DEFAULT_VARIANCE,
-lengthThresholdSlider.value = DEFAULT_LENGTH,
-lengthThresholdLabel.innerText = DEFAULT_LENGTH
+zoomLevelLabel.innerText = zoomLevel
 
 const getMaxValue = () => Math.pow(2, loadedFileHeader.BitsPerSample)/2-1
 
 const normalizeAudio = value => value/getMaxValue()
 
-const normalizeToCanvas = value => Math.round(normalizeAudio(value)*wavCanvas.height/2)
+const normalizeToCanvas = value => Math.round(normalizeAudio(value)*-wavCanvas.height/2)
 
 const getEndSample = () => offset + Math.round(wavCanvas.offsetWidth * resolution)
 
 const renderWave = () => {
 	if(zoomLevel >= 5) {
-		ipcRenderer.once('view', (e, data) => {
-			wavCanvas.width = wavCanvas.offsetWidth,
-			wavCanvas.height = wavCanvas.offsetHeight,
+		const data = ipcRenderer.sendSync('get-view', offset, getEndSample(), zoomLevel)
 
-			wavContext.translate(.5, Math.round(wavCanvas.height/2))
+		wavCanvas.width = wavCanvas.offsetWidth,
+		wavCanvas.height = wavCanvas.offsetHeight,
 
-			for(let x=0; x<data.length; x++) {
-				const [min, max] = data[x]
+		wavContext.translate(.5, Math.round(wavCanvas.height/2))
 
-				wavContext.beginPath()
-				wavContext.moveTo(x, normalizeToCanvas(min))
-				wavContext.lineTo(x, normalizeToCanvas(max))
-				wavContext.stroke()
-			}
-		})
+		for(let x=0; x<data.length; x++) {
+			const [min, max] = data[x]
 
-		ipcRenderer.send('get-view', offset, getEndSample(), zoomLevel)
+			wavContext.beginPath()
+			wavContext.moveTo(x, normalizeToCanvas(min))
+			wavContext.lineTo(x, normalizeToCanvas(max))
+			wavContext.stroke()
+		}
 	}
 	else {
-		ipcRenderer.once('samples', (e, data) => {
-			const view = new DataView(data.buffer)
+		const
+			data = ipcRenderer.sendSync('get-samples', offset, getEndSample()),
+			view = new DataView(data.buffer)
 
-			wavCanvas.width = wavCanvas.offsetWidth,
-			wavCanvas.height = wavCanvas.offsetHeight
+		wavCanvas.width = wavCanvas.offsetWidth,
+		wavCanvas.height = wavCanvas.offsetHeight
 
-			wavContext.translate(.5, Math.round(wavCanvas.height/2))
+		wavContext.translate(.5, Math.round(wavCanvas.height/2))
 
-			if(zoomLevel >= 0) {
-				wavContext.beginPath()
+		if(zoomLevel >= 0) {
+			wavContext.beginPath()
 
-				for(let i=0, x=0; i<data.length && x<wavCanvas.width; i+=loadedFileHeader.BlockAlign, x+=Math.pow(2, -zoomLevel)) {
-					let sample = 0
+			for(let i=0, x=0; i<data.length && x<wavCanvas.width; i+=loadedFileHeader.BlockAlign, x+=Math.pow(2, -zoomLevel)) {
+				const sample = readSample(view, i, loadedFileHeader.BlockAlign)
 
-					for(let j=0; j<loadedFileHeader.BlockAlign; j++)
-						sample += view.getInt8(i+j) << (8 * j)
-
-					if(i)
-						wavContext.lineTo(x, normalizeToCanvas(sample))
-					else wavContext.moveTo(x, normalizeToCanvas(sample))
-				}
-
-				wavContext.stroke()
+				if(i)
+					wavContext.lineTo(x, normalizeToCanvas(sample))
+				else wavContext.moveTo(x, normalizeToCanvas(sample))
 			}
-			else for(let i=0, x=0; i<data.length && x<wavCanvas.width; i+=loadedFileHeader.BlockAlign, x+=Math.pow(2, -zoomLevel)) {
-				let sample = 0
 
-				for(let j=0; j<loadedFileHeader.BlockAlign; j++)
-					sample += view.getInt8(i+j) << (8 * j)
+			wavContext.stroke()
+		}
+		else for(let i=0, x=0; i<data.length && x<wavCanvas.width; i+=loadedFileHeader.BlockAlign, x+=Math.pow(2, -zoomLevel)) {
+			const sample = readSample(view, i, loadedFileHeader.BlockAlign)
 
-				wavContext.beginPath()
-				wavContext.arc(x, normalizeToCanvas(sample), 2, 0, Math.PI*2)
-				wavContext.fill()
-			}
-		})
-
-		ipcRenderer.send('get-samples', offset, getEndSample())
+			wavContext.beginPath()
+			wavContext.arc(x, normalizeToCanvas(sample), 2, 0, Math.PI*2)
+			wavContext.fill()
+		}
 	}
 }
 
@@ -210,26 +170,32 @@ const renderPops = () => {
 
 	markersCanvas.width = markersCanvas.offsetWidth,
 	markersCanvas.height = markersCanvas.offsetHeight,
-	markersContext.strokeStyle = 'red'
 
-	markersContext.translate(.5, Math.round(markersCanvas.height/2))
+	markersContext.translate(0, Math.round(markersCanvas.height/2))
 
-	for(let [i] of pops) {
+	for(let [i, expected] of pops) {
 		if(i>=offset && i<=endSample) {
 			const x = Math.round((i-offset)/(endSample-offset) * markersCanvas.width)
 
+			markersContext.fillStyle = 'rgba(255,0,0,.2)'
 			markersContext.beginPath()
-			markersContext.moveTo(x, markersCanvas.height/2)
-			markersContext.lineTo(x, -markersCanvas.height/2)
-			markersContext.stroke()
+			markersContext.rect(x, -markersCanvas.height/2, Math.max(1, Math.round(11/resolution)), markersCanvas.height)
+			markersContext.fill()
+
+			const expectedX = x + Math.round(5/resolution)
+
+			markersContext.fillStyle = 'yellow'
+			markersContext.beginPath()
+			markersContext.arc(expectedX, normalizeToCanvas(expected), 2, 0, Math.PI*2)
+			markersContext.fill()
 		}
 	}
 }
 
-const render = () => {
+const render = () => requestAnimationFrame(() => {
 	renderWave()
 	renderPops()
-}
+})
 
 const loadFile = path => {
 	ipcRenderer.once('file-loaded', (e, data) => {
@@ -286,12 +252,8 @@ analyse.addEventListener('click', () => {
 
 		popsLabel.innerText = data.length
 
-		popsTableBody.innerHTML = pops.map(([sample, samples], i) => `
-			<tr id="sample-${i}">
-				<td>${sample}</td>
-				<td>${samples.length}</td>
-				<td>${samples.join(',')}</td>
-			</tr>
+		popsList.innerHTML = pops.map(([sample], i) => `
+			<li id="sample-${i}">${sample}</li>
 		`).join('\n')
 
 		renderPops()
@@ -302,49 +264,42 @@ analyse.addEventListener('click', () => {
 		analysisProgress.value = sample
 	})
 
-	ipcRenderer.send('get-analysis', thresholdSlider.value, varianceThresholdSlider.value, lengthThresholdSlider.value)
+	ipcRenderer.send('get-analysis')
 })
-
-thresholdSlider.addEventListener('input', e => thresholdSliderLabel.innerText = e.target.value)
-varianceThresholdSlider.addEventListener('input', e => varianceThresholdLabel.innerText = e.target.value)
-lengthThresholdSlider.addEventListener('input', e => lengthThresholdLabel.innerText = e.target.value)
 
 play.addEventListener('click', () => {
 	if(playing)
 		return playing.stop()
 
-	ipcRenderer.once('samples', (e, data) => {
-		if(!audioContext)
-			audioContext = new AudioContext()
+	if(!audioContext)
+		audioContext = new AudioContext()
 
-		const
-			samples = new Int16Array(data.buffer),
-			audioBuffer = audioContext.createBuffer(1, samples.length, loadedFileHeader.SampleRate),
-			channelBuffer = audioBuffer.getChannelData(0)
+	const
+		data = ipcRenderer.sendSync('get-samples', offset, getEndSample()),
+		view = new DataView(data.buffer),
+		audioBuffer = audioContext.createBuffer(1, data.length, loadedFileHeader.SampleRate),
+		channelBuffer = audioBuffer.getChannelData(0)
 
-		for(let i=0; i<samples.length; i++)
-			channelBuffer[i] = normalizeAudio(samples[i])
+	for(let i=0; i<data.length; i+=loadedFileHeader.BlockAlign)
+		channelBuffer[i/loadedFileHeader.BlockAlign] = normalizeAudio(readSample(view, i, loadedFileHeader.BlockAlign))
 
-		const source = audioContext.createBufferSource()
+	const source = audioContext.createBufferSource()
 
-		source.buffer = audioBuffer
-		source.connect(audioContext.destination)
-		source.start()
+	source.buffer = audioBuffer
+	source.connect(audioContext.destination)
+	source.start()
 
-		playing = source
+	playing = source
 
-		playing.addEventListener('ended', () => {
-			playing.disconnect(audioContext.destination)
+	playing.addEventListener('ended', () => {
+		playing.disconnect(audioContext.destination)
 
-			playing = null
+		playing = null
 
-			play.innerText = 'Play'
-		})
-
-		play.innerText = 'Stop'
+		play.innerText = 'Play'
 	})
 
-	ipcRenderer.send('get-samples', offset, getEndSample())
+	play.innerText = 'Stop'	
 })
 
 const setOffset = value => {
@@ -367,15 +322,15 @@ nextPop.addEventListener('click', () => {
 	focusPop()
 })
 
-popsTableBody.addEventListener('click', e => {
-	const row = e.target.closest('tr')
+popsList.addEventListener('click', e => {
+	const item = e.target.closest('li')
 
-	if(row) {
-		focusedPop = row.id.split('-')[1]
+	if(item) {
+		focusedPop = item.id.split('-')[1]
 		focusPop()
 	}
 })
 
-loadFile(path.resolve(__dirname, 'test_24_bit.wav'))
+loadFile(path.resolve(__dirname, 'test_16_bit_bext.wav'))
 </script>
 </html>
