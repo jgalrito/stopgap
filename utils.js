@@ -5,7 +5,7 @@ exports.readSample = (view, i, bytesPerSample) => {
 		for(let j=0; j<bytesPerSample; j++)
 			sample |= view.getUint8(i+j) << (8 * j)
 
-		//sign as 32 bit
+		//sign extension for 32 bit
 		return sample & 0x800000 ? sample | 0xff000000 : sample
 	}
 
