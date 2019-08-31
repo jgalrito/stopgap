@@ -1,6 +1,7 @@
 const
 	{ app, BrowserWindow, ipcMain } = require('electron'),
-	fs = require('fs')
+	fs = require('fs'),
+	path = require('path')
 
 const { readSample } = require('./utils')
 
@@ -12,7 +13,8 @@ const
 
 let loadedFile,
 	loadedFileHeader,
-	cachedChunks = {}
+	cachedChunks = {},
+	pops
 
 const
 	pipeAsync = (...fns) => async arg => {
@@ -21,6 +23,14 @@ const
 
 		return arg
 	},
+	pipe = (...fns) => arg => {
+		for(let fn of fns)
+			arg = fn(arg)
+
+		return arg
+	}
+
+const
 	reader = (fd, cursor = 0) => [{fd, cursor}],
 	read = n => ([{fd, cursor, ...state}]) => new Promise((resolve, reject) =>
 		fs.read(fd, Buffer.alloc(n), 0, n, cursor, (err, bytesRead, buf) => {
@@ -59,6 +69,16 @@ const
 	},
 	getCursor = ([state]) => [state, state.cursor]
 
+const
+	write = buf => ws => new Promise(resolve => {
+		if(!ws.write(buf))
+			ws.once('drain', resolve)
+		else process.nextTick(resolve)
+	}),
+	writeString = string => write(Buffer.alloc(4).write(string)),
+	writeInt = int => write(Buffer.alloc(4).writeInt32LE(int)),
+	write16Int = int => write(Buffer.alloc(2).writeInt16LE(int))
+
 const readMeta = async ([state]) => {
 	const chunks = []
 
@@ -86,6 +106,18 @@ const readMeta = async ([state]) => {
 		)([state])
 
 	return [state, chunks]
+}
+
+const writeMeta = async ws => {
+	for(let {id, size, data} of loadedFileHeader.Meta) {
+		await pipe(
+			writeString(id),
+			writeInt(size)
+		)(ws)
+
+		if(data)
+			await write(data)
+	}
 }
 
 const readHeader = pipeAsync(
@@ -176,19 +208,20 @@ const cacheChunks = async () => {
 	return caches
 }
 
-ipcMain.on('load-file', (e, path) => {
-	fs.open(path, async (err, fd) => {
+ipcMain.on('load-file', (e, filePath) =>
+	fs.open(filePath, async (err, fd) => {
 		if(err)
 			throw err
 
 		loadedFile = fd,
-		loadedFileHeader = await readHeader(fd),
+		loadedFileHeader = {
+			...(await readHeader(fd)),
+			filename: path.basename(filePath, '.wav')
+		},
 		cachedChunks = await cacheChunks()
 
 		e.reply('file-loaded', loadedFileHeader)
-	})
-
-})
+	}))
 
 ipcMain.on('get-view', (e, start, end, zoomLevel) => {
 	const
@@ -207,8 +240,9 @@ ipcMain.on('get-samples', (e, start, end) =>
 	}))
 
 ipcMain.on('get-analysis', async e => {
+	pops = []
+
 	const
-		pops = [],
 		samples = await getSamples(),
 		onePerCent = Math.round(samples.length/100)
 
@@ -257,6 +291,27 @@ ipcMain.on('get-analysis', async e => {
 	}
 
 	e.reply('analysis', pops)
+})
+
+ipcMain.on('fix', async () => {
+	const fixedFile = fs.createWriteStream(path.resolve(__dirname, loadedFileHeader.filename + '_fixed.wav'))
+
+	await pipeAsync(
+		writeString(loadedFileHeader.ChunkID),
+		writeInt(loadedFileHeader.ChunkSize),
+		writeString(loadedFileHeader.Format),
+		writeString(loadedFileHeader.Subchunk1ID),
+		writeInt(loadedFileHeader.Subchunk1Size),
+		write16Int(loadedFileHeader.AudioFormat),
+		write16Int(loadedFileHeader.NumChannels),
+		writeInt(loadedFileHeader.SampleRate),
+		writeInt(loadedFileHeader.ByteRate),
+		write16Int(loadedFileHeader.BlockAlign),
+		write16Int(loadedFileHeader.BitsPerSample),
+		writeMeta
+	)(fixedFile)
+
+
 })
 
 app.on('ready', () => {
